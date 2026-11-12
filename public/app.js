@@ -1,6 +1,7 @@
 import {ArchiveCalendar,todayKey,formatWeek,weekNumber,weekStart,addDays} from '/calendar.js';
 import {countryOf,regionItems,GENRES} from '/catalog.js';
 import {openMobileAccess} from '/mobile.js';
+import {watchUpdates} from '/live.js';
 const icons={compass:'<circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/>',bookmark:'<path d="M6 4h12v17l-6-4-6 4V4Z"/>',archive:'<path d="M4 8h16v13H4zM3 3h18v5H3zM9 12h6"/>',smartphone:'<rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10 18h4M10 5h4"/>',info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',calendar:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18M7 15h3M14 15h3"/>','chevron-down':'<path d="m6 9 6 6 6-6"/>','arrow-up-right':'<path d="M7 17 17 7M7 7h10v10"/>',play:'<path d="m9 5 10 7-10 7V5Z"/>',layers:'<path d="m12 3 10 5-10 5L2 8l10-5ZM2 12l10 5 10-5M2 16l10 5 10-5"/>',radio:'<path d="M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14M8 8a6 6 0 0 0 0 8M16 8a6 6 0 0 1 0 8"/><circle cx="12" cy="12" r="2"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>',refresh:'<path d="M20 7v5h-5M4 17v-5h5M6.1 6.2a8 8 0 0 1 13.6 4M17.9 17.8a8 8 0 0 1-13.6-4"/>',grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',list:'<path d="M9 6h12M9 12h12M9 18h12M3 6h.1M3 12h.1M3 18h.1"/>',sliders:'<path d="M4 6h16M4 12h16M4 18h16M8 4v4M16 10v4M10 16v4"/>',x:'<path d="m6 6 12 12M6 18 18 6"/>',flame:'<path d="M12 3c2 5 5 5 5 10a5 5 0 0 1-10 0c0-2 1-4 3-6 0 3 1 4 2 4 2-1 2-4 0-8Z"/>',check:'<path d="m5 12 4 4L19 6"/>',heart:'<path d="M20 5c-3-3-7-1-8 2-1-3-5-5-8-2-5 5 8 15 8 15S25 10 20 5Z"/>',wifi:'<path d="M3 8a15 15 0 0 1 18 0M6 12a10 10 0 0 1 12 0M9 16a5 5 0 0 1 6 0M12 20h.01"/>'};
 const icon=name=>`<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name]||icons.info}</svg>`;
 const $=s=>document.querySelector(s), $$=s=>document.querySelectorAll(s);
@@ -100,12 +101,12 @@ function renderSchedule(){
  const failures=state.schedule?.feeds.filter(x=>x.error)||[];
  const banner=$('#status-banner');banner.hidden=false;banner.classList.toggle('warning',!navigator.onLine||!!state.scheduleError||!!failures.length);
  banner.textContent=!navigator.onLine?'当前离线，显示已缓存的排期。联网后可重新读取。':state.scheduleError?'排期读取失败，请稍后重试。':failures.length?'部分时间表暂不可用，已保留最近成功数据；日期以缓存记录为准。':'排期来自腾讯视频、哔哩哔哩、优酷和爱奇艺的官方更新日历；卡片优先显示平台公布的更新时间，只有更新日、没有钟点的会标出星期几。「平台排期」不代表已确认上线，会员抢先看以更新说明为准。';
- $('#ranking-note').innerHTML=`${state.schedule?.feeds.find(x=>x.fetchedAt)?.fetchedAt?'排期最近采集 '+dateText(state.schedule.feeds.find(x=>x.fetchedAt).fetchedAt,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})+' · ':''}每 6 小时自动读取，临时停更与会员更新以正版平台为准。<button data-action="schedule-retry">重新读取 ↗</button>`;
+ $('#ranking-note').innerHTML=`${state.schedule?.feeds.find(x=>x.fetchedAt)?.fetchedAt?'排期最近采集 '+dateText(state.schedule.feeds.find(x=>x.fetchedAt).fetchedAt,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})+' · ':''}每分钟自动同步，临时停更与会员更新以正版平台为准。<button data-action="schedule-retry">重新读取 ↗</button>`;
 }
-async function fetchSchedule(){
+async function fetchSchedule({force=false,silent=false}={}){
  if(scheduleRequest)return scheduleRequest;
- state.scheduleLoading=true;state.scheduleError='';if(state.page==='schedule')renderCards();
- scheduleRequest=(async()=>{try{const r=await fetch('/api/schedule',{signal:AbortSignal.timeout(45000)});if(!r.ok)throw new Error('排期读取失败');state.schedule=await r.json();}catch(e){state.scheduleError=e.message;}finally{state.scheduleLoading=false;scheduleRequest=null;if(state.page==='schedule')renderCards();}})();
+ const previousError=state.scheduleError;state.scheduleLoading=true;state.scheduleError='';if(!silent&&state.page==='schedule')renderCards();
+ scheduleRequest=(async()=>{let changed=false;try{const r=await fetch(force?'/api/schedule/refresh':'/api/schedule',{method:force?'POST':'GET',cache:'no-store',signal:AbortSignal.timeout(45000)});const data=await r.json();if(!r.ok)throw new Error(data.error||'排期读取失败');changed=JSON.stringify(data)!==JSON.stringify(state.schedule);state.schedule=data;if(!silent&&force)toast(data.feeds.some(x=>x.error)?'已同步可用排期，部分平台暂不可用':'每日排期已同步');}catch(e){state.scheduleError=e.message;}finally{state.scheduleLoading=false;scheduleRequest=null;if(state.page==='schedule'&&(!silent||changed||state.scheduleError||previousError))renderCards();renderSyncStatus();}})();
  return scheduleRequest;
 }
 function updateBanner(){
@@ -115,9 +116,21 @@ function updateBanner(){
   const source=state.data?.sources.find(s=>s.id===state.platform);
   if(source){text+=`${text?' ':''}${source.name} · ${source.kind}。${source.id==='bilibili'?'国创榜与番剧榜分别为近 7 天榜单；番剧榜已过滤欧美动画和真人特摄。':source.id==='youku'?'热度榜作品与平台推荐分别标注，推荐项不标榜位。':'保留平台原始榜位，按原产地筛选国漫与日漫。'}`;if(source.error){text+=source.count?' 当前来源不可用，展示最近成功获取的数据。':' 当前来源不可用，请稍后刷新。';warning=true;}}
  }else if(state.data?.sources.some(s=>s.error)){text+=`${text?' ':''}${state.data.sources.filter(s=>s.error).map(s=>s.name).join('、')}暂时不可用；有缓存的来源显示上次数据。`;warning=true;}
- else if(state.data?.updatedAt&&Date.now()-new Date(state.data.updatedAt)>7*3600000){text+='当前显示已保存的榜单，数据尚未更新。';warning=true;}
+ else if(state.data?.updatedAt&&Date.now()-new Date(state.data.updatedAt)>5*60000){text+='当前显示已保存的榜单，数据尚未更新。';warning=true;}
  if(!navigator.onLine){text='当前处于离线状态，展示本机缓存。联网后可刷新榜单。';warning=true;}
  el.hidden=!text;el.textContent=text;el.classList.toggle('warning',warning);
+}
+function renderSyncStatus(){
+ const el=$('#sync-status');if(!el)return;
+ const daily=state.page==='schedule',archive=state.page==='archive';
+ const sources=daily?state.schedule?.feeds||[]:state.data?.sources||[];
+ const times=sources.map(s=>s.fetchedAt).filter(Boolean).sort();
+ const latest=times.at(-1),oldest=times[0];
+ const stale=!!oldest&&Date.now()-new Date(oldest)>5*60000;
+ const failed=(daily?state.scheduleError:state.syncError)||sources.some(s=>s.error);
+ const text=!navigator.onLine?'当前离线 · 联网后自动同步':archive?'历史周刊 · 保留采集时的记录':failed?'部分来源待重试 · 已保留最近数据':stale?'数据较旧 · 正在等待平台同步':latest?'自动同步中':'正在连接平台';
+ el.classList.toggle('warning',!navigator.onLine||!!failed||stale);el.hidden=false;
+ el.innerHTML=`<span><i></i>${escape(text)}</span><small>${archive?'':`${daily?'排期每分钟':'榜单每 2 分钟'}采集${latest?' · 最近成功 '+dateText(latest,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}):''}`}</small>`;
 }
 function renderRegionControls(){
  $$('[data-region]').forEach(b=>{const active=b.dataset.region===state.region;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
@@ -147,18 +160,19 @@ function renderPage(){
  $('#list-description').textContent=savedPage?'属于你的动漫片单，下一份心动也收藏在这里。':archive&&state.data?.week?weekText(state.data.week)+' · 当周保存的动漫片单':`从平台热榜出发，发现正在被追的好${regionName()}。`;
  $$('[data-page]').forEach(button=>{const active=button.dataset.page===state.page;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');});
  $$('[data-platform]').forEach(button=>{const active=button.dataset.platform===state.platform;button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));});
- renderRegionControls();renderSavedCounts();renderStats();renderHero();renderCards();
+ renderRegionControls();renderSavedCounts();renderStats();renderHero();renderCards();renderSyncStatus();
  $('#week-caption').textContent=archive?'回看的刊期':'本周刊期';
 }
 
-async function fetchData(week=null){
- const id=++requestId;state.loading=true;renderCards();
+async function fetchData(week=null,{silent=false}={}){
+ if(silent&&state.loading)return false;
+ const id=++requestId;state.loading=true;if(!silent)renderCards();
  try{
-  const response=await fetch(`/api/rankings${week?`?week=${encodeURIComponent(week)}`:''}`,{signal:AbortSignal.timeout(45000)});
+  const response=await fetch(`/api/rankings${week?`?week=${encodeURIComponent(week)}`:''}`,{cache:'no-store',signal:AbortSignal.timeout(45000)});
   const data=await response.json();if(!response.ok)throw new Error(data.error||'榜单获取失败');if(id!==requestId)return false;
-  state.data=data;state.week=week;state.loading=false;renderPage();return true;
+  const changed=JSON.stringify(state.data)!==JSON.stringify(data);state.data=data;state.week=week;state.loading=false;state.syncError=false;if(!silent||changed)renderPage();else renderSyncStatus();return true;
  }catch(error){
-  if(id!==requestId)return false;state.loading=false;if(!state.data)state.data={items:[],sources:[],updatedAt:null};renderPage();
+  if(id!==requestId)return false;state.loading=false;state.syncError=true;if(!state.data)state.data={items:[],sources:[],updatedAt:null};renderPage();if(silent)return false;
   toast(error.name==='TimeoutError'?'连接超时，请稍后刷新榜单':error.message==='Failed to fetch'?'网络连接失败，请检查网络':error.message);return false;
  }
 }
@@ -169,7 +183,7 @@ let modalPreviousFocus;
 function showModal(html,detail=''){if(!$('#modal').open)modalPreviousFocus=document.activeElement;$('#modal').classList.toggle('calendar-dialog',html.includes('calendar-picker'));$('#modal-content').innerHTML=html;$('#modal-content').dataset.detail=detail;hydrateIcons($('#modal'));if(!$('#modal').open)$('#modal').showModal();document.body.style.overflow='hidden';$('#modal').scrollTop=0;}
 function safeLink(url){try{const u=new URL(url);return u.protocol==='https:'?escape(u.href):'#';}catch{return '#';}}
 function showDetail(id){const x=itemById(id);if(!x)return;const source=currentSource(x);showModal(`<div class="detail-backdrop" style="background-image:url('${escape(img(source.backdrop||source.cover))}')"><div class="detail-hero-title"><small>ANIME WEEKLY · ${regionLabel(x)}片单</small><h2>${escape(x.title)}</h2></div></div><div class="detail-body"><div class="detail-tags"><span>${countryOf(x)==='日本'?'日本 · 日本动画':'中国 · 国产动画'}</span>${genres(x).map(t=>`<span>${escape(t)}</span>`).join('')}${x.rating?`<span>★ ${x.rating} B站评分</span>`:''}</div><p>${escape(x.description||'这个故事正在被更多人看见。前往正版平台，了解剧情与最新更新。')}</p><div class="detail-actions"><span style="font-size:11px;color:#8b95ac">${escape(episode(x))}</span><button class="detail-save" data-save="${escape(x.id)}">${icon(saved[x.id]?'check':'bookmark')}${saved[x.id]?'已加入我的追番':'加入我的追番'}</button></div>${(x.schedule?.updateText||x.schedule?.scheduleText)?`<h3>更新说明</h3><p>${escape(x.schedule.updateText||x.schedule.scheduleText)}</p>`:''}<h3>在这些平台发现</h3>${x.platforms.map(p=>`<div class="source-detail"><span class="platform-logo ${p.source}">${marks[p.source]}</span><div><strong>${names[p.source]} ${p.rank?`· ${chartLabel(p)}第 ${p.rank} 名`:`· ${p.kind?'每日更新':regionLabel(p)+'推荐'}`}</strong><p>${p.metric!=null?`${escape(p.metricLabel)} ${number(p.metric)} · `:''}${p.fetchedAt?dateText(p.fetchedAt,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'已收藏'}${p.stale?' · 使用缓存':''}</p></div><a href="${safeLink(p.url)}" target="_blank" rel="noopener noreferrer">正版观看 ${icon('arrow-up-right')}</a></div>`).join('')}<p class="detail-note">${x.schedule?`${escape(scheduleDetailNote(x.schedule))}。`:x.index!=null?`综合榜单指数 ${x.index} · 各平台评分、热度互不通用。`:'来自平台每日更新时间表。'}观看、会员与播放权限以原平台为准。题材由平台标签与作品分类整理。</p></div>`,id);}
-function showAbout(){const sources=state.data?.sources||[];showModal(`<div class="modal-inner"><div class="modal-eyebrow">ABOUT THE CHARTS</div><h2>把每一份热爱，认真记录。</h2><p>动漫周刊汇集四大平台的公开榜单与国漫、日漫片单，每 6 小时自动更新，按北京时间的自然周（周一至周日）保存。服务运行期间会持续搜寻，手机离线时可以查看缓存。</p><h3>四个平台，各自真实的榜单</h3>${sources.map(s=>`<div class="source-detail"><span class="platform-logo ${s.id}">${marks[s.id]}</span><div><strong>${escape(s.name)} · ${escape(s.kind)}</strong><p>${s.count} 部 · ${s.error?escape(s.error):s.fetchedAt?dateText(s.fetchedAt,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'等待更新'}</p></div><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a></div>`).join('')}<h3>综合排序是怎么来的？</h3><p>按各平台原始名次计算倒数排名分：每次上榜贡献 1 /（60 + 名次），多平台同名作品相加，再将第一名归一为 100 分。优酷推荐项每项贡献 0.35 / 100，低于正式榜单。这个「榜单指数」是本站发现排序，不代表官方热度或周播放量。仅合并名称一致的作品，不同季数分别保留。</p><h3>国漫 / 日漫，自由切换</h3><p>可以查看全部动漫，也可按国漫、日漫筛选。B站国创榜与番剧榜分别采集，番剧榜只保留已确认的日本动画；爱奇艺按地区字段筛选；腾讯与优酷结合平台分类及已确认系列识别产地。中文版日漫仍归日漫，欧美动画、未知产地作品和真人特摄不收入。题材结合平台标签与本地作品分类，可能不完整。</p><h3>你的片单属于你</h3><p>收藏保存在本机浏览器，不需要注册账号。清除浏览器数据会移除收藏；不同设备之间暂不自动同步。首次运行以前的周榜不会补造，存档从实际采集时开始。</p></div>`);}
+function showAbout(){const sources=state.data?.sources||[];showModal(`<div class="modal-inner"><div class="modal-eyebrow">ABOUT THE CHARTS</div><h2>把每一份热爱，认真记录。</h2><p>动漫周刊汇集四大平台的公开榜单与国漫、日漫片单，榜单每 2 分钟、排期每分钟自动同步，按北京时间的自然周（周一至周日）保存。服务运行期间会持续搜寻，手机离线时可以查看缓存。</p><h3>四个平台，各自真实的榜单</h3>${sources.map(s=>`<div class="source-detail"><span class="platform-logo ${s.id}">${marks[s.id]}</span><div><strong>${escape(s.name)} · ${escape(s.kind)}</strong><p>${s.count} 部 · ${s.error?escape(s.error):s.fetchedAt?dateText(s.fetchedAt,{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'等待更新'}</p></div><a href="${safeLink(s.url)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a></div>`).join('')}<h3>综合排序是怎么来的？</h3><p>按各平台原始名次计算倒数排名分：每次上榜贡献 1 /（60 + 名次），多平台同名作品相加，再将第一名归一为 100 分。优酷推荐项每项贡献 0.35 / 100，低于正式榜单。这个「榜单指数」是本站发现排序，不代表官方热度或周播放量。仅合并名称一致的作品，不同季数分别保留。</p><h3>国漫 / 日漫，自由切换</h3><p>可以查看全部动漫，也可按国漫、日漫筛选。B站国创榜与番剧榜分别采集，番剧榜只保留已确认的日本动画；爱奇艺按地区字段筛选；腾讯与优酷结合平台分类及已确认系列识别产地。中文版日漫仍归日漫，欧美动画、未知产地作品和真人特摄不收入。题材结合平台标签与本地作品分类，可能不完整。</p><h3>你的片单属于你</h3><p>收藏保存在本机浏览器，不需要注册账号。清除浏览器数据会移除收藏；不同设备之间暂不自动同步。首次运行以前的周榜不会补造，存档从实际采集时开始。</p></div>`);}
 const archiveCalendar=new ArchiveCalendar({
  root:$('#modal-content'),
  open:html=>showModal(html),
@@ -183,7 +197,7 @@ async function showWeeks(){await archiveCalendar.show(state.archiveDate||state.w
 
 async function showInstall(){await openMobileAccess({showModal,escape,toast,install:async()=>{if(!installPrompt){toast('请按上方步骤添加到手机主屏幕');return;}await installPrompt.prompt();const result=await installPrompt.userChoice;installPrompt=null;if(result.outcome==='accepted')toast('已添加动漫周刊到主屏幕');}});}
 
-async function doRefresh(){if(state.page==='schedule'){await fetchSchedule();return;}if(state.week){await fetchData(state.week);toast('已重新读取周榜存档');return;}const buttons=$$('[data-action="refresh"]');buttons.forEach(b=>{b.disabled=true;b.classList.add('loading');});try{const r=await fetch('/api/refresh',{method:'POST',signal:AbortSignal.timeout(45000)});const d=await r.json();if(!r.ok)throw new Error(d.error||'更新失败');state.data=d;renderPage();toast(d.sources.some(s=>s.error)?'已更新可用来源，部分平台暂不可用':'已同步四大平台，榜单更新完成');}catch(e){toast(e.name==='TimeoutError'?'更新仍在进行，稍后会自动显示':e.message==='Failed to fetch'?'网络不可用，请连接后再试':e.message);}finally{buttons.forEach(b=>{b.disabled=false;b.classList.remove('loading');});}}
+async function doRefresh(){if(state.page==='schedule'){await fetchSchedule({force:true});return;}if(state.week){await fetchData(state.week);toast('已重新读取周榜存档');return;}const buttons=$$('[data-action="refresh"]');buttons.forEach(b=>{b.disabled=true;b.classList.add('loading');});try{const r=await fetch('/api/refresh',{method:'POST',signal:AbortSignal.timeout(45000)});const d=await r.json();if(!r.ok)throw new Error(d.error||'更新失败');state.data=d;renderPage();toast(d.sources.some(s=>s.error)?'已更新可用来源，部分平台暂不可用':'已同步四大平台，榜单更新完成');}catch(e){toast(e.name==='TimeoutError'?'更新仍在进行，稍后会自动显示':e.message==='Failed to fetch'?'网络不可用，请连接后再试':e.message);}finally{buttons.forEach(b=>{b.disabled=false;b.classList.remove('loading');});}}
 function resetFilters(){state.platform='all';state.genre='all';state.query='';state.sort='rank';state.limit=12;$('#search').value='';$('#sort').value='rank';renderPage();}
 async function changePage(page){
  if(page==='archive'){await showWeeks();return;}
@@ -199,7 +213,7 @@ document.addEventListener('click',async e=>{
  if(action==='schedule-today'){state.scheduleDate=todayKey();state.scheduleUnknown=false;state.limit=12;renderCards();}
  if(action==='schedule-unknown'){state.scheduleUnknown=!state.scheduleUnknown;state.limit=12;renderCards();}
  if(action==='schedule-saved'){state.scheduleSaved=!state.scheduleSaved;state.limit=12;renderCards();}
- if(action==='schedule-retry')await fetchSchedule();
+ if(action==='schedule-retry')await fetchSchedule({force:true});
 });
 
 document.addEventListener('click',async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.detail){showDetail(b.dataset.detail);return;}if(b.dataset.save){toggleSave(b.dataset.save);return;}if(b.dataset.page){await changePage(b.dataset.page);return;}if(b.dataset.platform){state.platform=b.dataset.platform;state.limit=12;renderPage();if(b.closest('.source-nav'))$('.rankings-section').scrollIntoView({behavior:'smooth',block:'start'});return;}if(b.dataset.region){state.region=b.dataset.region;state.genre='all';state.limit=12;state.heroIndex=0;try{localStorage.setItem('guoman-region',state.region);}catch{}renderPage();return;}if(b.dataset.genre){state.genre=b.dataset.genre;state.limit=12;renderPage();return;}if(b.dataset.view){state.view=b.dataset.view;try{localStorage.setItem('guoman-view',state.view);}catch{}renderCards();return;}if(b.dataset.hero!=null){state.heroIndex=Number(b.dataset.hero);renderHero();return;}const action=b.dataset.action;if(action==='about')showAbout();if(action==='install')await showInstall();if(action==='weeks')await showWeeks();if(action==='close-modal')$('#modal').close();if(action==='refresh')await doRefresh();if(action==='reset-filters')resetFilters();if(action==='focus-search'){$('.topbar').classList.toggle('search-open');$('#search').focus();}});
@@ -211,7 +225,7 @@ $('#modal').addEventListener('close',()=>{document.body.style.overflow='';modalP
 $('#modal').addEventListener('click',e=>{if(e.target===$('#modal')){const r=$('#modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('#modal').close();}});
 document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!$('#modal').open){e.preventDefault();$('.topbar').classList.add('search-open');$('#search').focus();}});
 window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;});
-window.addEventListener('online',()=>{toast('网络已连接');if(state.page!=='archive')fetchData();if(state.page==='schedule')fetchSchedule();});window.addEventListener('offline',()=>{if(state.page==='schedule')renderCards();else updateBanner();toast('已离线，仍可浏览已缓存的片单');});
+window.addEventListener('online',()=>{toast('网络已连接');renderSyncStatus();});window.addEventListener('offline',()=>{if(state.page==='schedule')renderCards();else updateBanner();renderSyncStatus();toast('已离线，仍可浏览已缓存的片单');});
 if('serviceWorker'in navigator&&window.isSecureContext)navigator.serviceWorker.register('/sw.js').catch(()=>{});
-setInterval(()=>{if(state.page!=='archive'&&document.visibilityState==='visible')fetchData();if(state.page==='schedule'&&document.visibilityState==='visible')fetchSchedule();},5*60*1000);
+watchUpdates(type=>{if(state.page==='archive')return;if(type==='rankings')void fetchData(null,{silent:true});if(type==='schedule'&&state.page==='schedule')void fetchSchedule({silent:true});});
 renderSavedCounts();renderPage();fetchData();

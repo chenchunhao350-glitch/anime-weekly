@@ -7,51 +7,47 @@ import {SOURCE_INFO,loaders,aggregate,weekKey} from './src/sources.mjs';
 import {SCHEDULE_FEEDS,loadTimeline,buildSchedule} from './src/schedule.mjs';
 import {mobileAccess} from './src/mobile-access.mjs';
 import {qrSvg} from './src/qr.mjs';
+import {refreshTask} from './src/refresh-task.mjs';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const dataDir=path.join(root,'data');
 await fs.mkdir(dataDir,{recursive:true});
 const CACHE=path.join(dataDir,'current.json');
-const INTERVAL=6*60*60*1000;
+const RANK_INTERVAL=120000,SCHEDULE_INTERVAL=60000;
 const DATA_VERSION=2;
-let state={sources:{},updatedAt:null}, updating=null, lastAttempt=0, lastManual=0;
+let state={sources:{},updatedAt:null}, lastManual=0,lastScheduleManual=0;
 try {state=JSON.parse(await fs.readFile(CACHE,'utf8'));}catch{}
-lastAttempt=state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
 const imageCache=new Map();
 const SCHEDULE_CACHE=path.join(dataDir,'schedule.json');
-let scheduleFeeds={},scheduleUpdating=null,scheduleAttempt=0;
+let scheduleFeeds={};
 try{scheduleFeeds=JSON.parse(await fs.readFile(SCHEDULE_CACHE,'utf8'));}catch{}
-async function refreshSchedule(force=false){
-  if(scheduleUpdating)return scheduleUpdating;
-  if(!force&&Date.now()-scheduleAttempt<INTERVAL)return;
-  scheduleAttempt=Date.now();
-  scheduleUpdating=(async()=>{
+const clients=new Set();
+let revision={rankings:0,schedule:0};
+function publish(type){revision[type]++;for(const res of clients){if(res.writableLength>65536){res.destroy();clients.delete(res);}else res.write(`event: sync\ndata: ${JSON.stringify(revision)}\n\n`);}}
+const refreshSchedule=refreshTask(async()=>{
     await Promise.all(Object.entries(SCHEDULE_FEEDS).map(async([id,feed])=>{
       try{scheduleFeeds[id]={items:await loadTimeline(feed),fetchedAt:new Date().toISOString(),error:null};}
       catch(e){scheduleFeeds[id]={...(scheduleFeeds[id]||{items:[],fetchedAt:null}),error:e.message};}
     }));
     await atomicWrite(SCHEDULE_CACHE,scheduleFeeds);
-  })().finally(()=>{scheduleUpdating=null;});
-  return scheduleUpdating;
-}
+    publish('schedule');
+},{interval:SCHEDULE_INTERVAL});
 async function atomicWrite(filename,value){const temp=filename+'.tmp';await fs.writeFile(temp,JSON.stringify(value));await fs.rename(temp,filename);}
-function payload(snapshot=state){return { updatedAt:snapshot.updatedAt, week:snapshot.week || weekKey(), refreshIntervalHours:6, sources:Object.entries(SOURCE_INFO).map(([id,info])=>({id,...info,count:snapshot.sources[id]?.items?.length || 0,fetchedAt:snapshot.sources[id]?.fetchedAt || null,error:snapshot.sources[id]?.error || null})), items:aggregate(snapshot.sources) };}
-async function refresh(){
-  if(updating)return updating;
-  lastAttempt=Date.now();
-  updating=(async()=>{
+function payload(snapshot=state){return { updatedAt:snapshot.updatedAt, week:snapshot.week || weekKey(), refreshIntervalSeconds:RANK_INTERVAL/1000, sources:Object.entries(SOURCE_INFO).map(([id,info])=>({id,...info,count:snapshot.sources[id]?.items?.length || 0,fetchedAt:snapshot.sources[id]?.fetchedAt || null,error:snapshot.sources[id]?.error || null})), items:aggregate(snapshot.sources) };}
+function schedulePayload(){return {...buildSchedule(scheduleFeeds,state.sources),refreshIntervalSeconds:SCHEDULE_INTERVAL/1000};}
+const refresh=refreshTask(async()=>{
     const results=await Promise.allSettled(Object.entries(loaders).map(async([id,load])=>{
       try {const items=await load();if(!items.length)throw new Error('来源未返回可确认地区的动漫');return [id,{items,fetchedAt:new Date().toISOString(),error:null}];}
       catch(e){return [id,{...(state.sources[id] || {items:[],fetchedAt:null}),error:e.message}];}
     }));
     for(const result of results)if(result.status==='fulfilled')state.sources[result.value[0]]=result.value[1];
-    state.updatedAt=new Date().toISOString();state.week=weekKey();state.version=DATA_VERSION;
+    const successes=Object.values(state.sources).map(s=>s.fetchedAt).filter(Boolean).sort();
+    state.updatedAt=successes.at(-1)||null;state.week=weekKey();state.version=DATA_VERSION;
     await atomicWrite(CACHE,state);
     if(Object.values(state.sources).some(s=>s.items.length))await atomicWrite(path.join(dataDir,`week-${state.week}.json`),state);
+    publish('rankings');
     console.log('榜单更新',state.updatedAt,Object.entries(state.sources).map(([id,s])=>`${id}: ${s.items.length}${s.error?' (cached/error)':''}`).join(' | '));
-  })().finally(()=>{updating=null;});
-  return updating;
-}
+},{interval:RANK_INTERVAL});
 const mime={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.json':'application/json; charset=utf-8','.webmanifest':'application/manifest+json','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon'};
 function json(res,value,status=200){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(value));}
 const allowedImageHosts=['hdslb.com','qpic.cn','iqiyipic.com','alicdn.com','ykimg.com'];
@@ -82,6 +78,12 @@ const server=http.createServer(async(req,res)=>{
  try{
   const url=new URL(req.url,'http://localhost');
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');
+  if(url.pathname==='/api/events'&&req.method==='GET'){
+    res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});
+    res.write(`retry: 3000\nevent: sync\ndata: ${JSON.stringify(revision)}\n\n`);clients.add(res);
+    const heartbeat=setInterval(()=>res.write(': heartbeat\n\n'),20000);
+    res.on('close',()=>{clearInterval(heartbeat);clients.delete(res);});return;
+  }
   if((url.pathname==='/api/mobile-access'||url.pathname==='/api/mobile/qr')&&req.method==='GET'){
     const access=await mobileAccess(dataDir);
     if(url.pathname==='/api/mobile-access')return json(res,access);
@@ -90,7 +92,12 @@ const server=http.createServer(async(req,res)=>{
   }
   if(url.pathname==='/api/schedule'&&req.method==='GET'){
     await refreshSchedule();
-    return json(res,buildSchedule(scheduleFeeds,state.sources));
+    return json(res,schedulePayload());
+  }
+  if(url.pathname==='/api/schedule/refresh'&&req.method==='POST'){
+    if(req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host)return json(res,{error:'不允许跨站刷新'},403);
+    if(Date.now()-lastScheduleManual<60000)return json(res,{error:'刚刚更新过，请一分钟后再试'},429);
+    lastScheduleManual=Date.now();await refreshSchedule(true);return json(res,schedulePayload());
   }
   if(url.pathname==='/api/rankings' && req.method==='GET'){
     const week=url.searchParams.get('week');
@@ -98,14 +105,14 @@ const server=http.createServer(async(req,res)=>{
       if(!/^\d{4}-\d{2}-\d{2}$/.test(week))return json(res,{error:'无效的周次'},400);
       try{return json(res,payload(JSON.parse(await fs.readFile(path.join(dataDir,`week-${week}.json`),'utf8'))));}catch{return json(res,{error:'这一周还没有存档'},404);}
     }
-    if(!state.updatedAt || state.version!==DATA_VERSION)await refresh();
+    await refresh(state.week!==weekKey());
     return json(res,payload());
   }
   if(url.pathname==='/api/weeks')return json(res,{weeks:(await fs.readdir(dataDir)).filter(x=>/^week-\d{4}-\d{2}-\d{2}\.json$/.test(x)).map(x=>x.slice(5,-5)).sort().reverse()});
   if(url.pathname==='/api/refresh' && req.method==='POST'){
     if(req.headers.origin && new URL(req.headers.origin).host!==req.headers.host)return json(res,{error:'不允许跨站刷新'},403);
     if(Date.now()-lastManual<60_000)return json(res,{error:'刚刚更新过，请一分钟后再试'},429);
-    lastManual=Date.now();await refresh();return json(res,payload());
+    lastManual=Date.now();await refresh(true);return json(res,payload());
   }
   if(url.pathname==='/api/image' && req.method==='GET')return await serveImage(res,url);
   if(url.pathname==='/api/network'){
@@ -122,7 +129,7 @@ const server=http.createServer(async(req,res)=>{
  }catch(e){if(!res.headersSent)json(res,{error:'请求暂时失败，请稍后重试'},502);else res.end();console.error(e.message);}
 });
 const port=Number(process.env.PORT || 3000);
-server.listen(port,'0.0.0.0',()=>console.log(`动漫周刊 http://localhost:${port}`));
+server.listen(port,'0.0.0.0',()=>console.log(`动漫周刊 http://localhost:${server.address().port}`));
 refreshSchedule().catch(console.error);
-if(!state.updatedAt || state.version!==DATA_VERSION || Date.now()-new Date(state.updatedAt).getTime()>INTERVAL)refresh().catch(console.error);
-setInterval(()=>{if(Date.now()-lastAttempt>INTERVAL || state.week!==weekKey())refresh().catch(console.error);if(Date.now()-scheduleAttempt>INTERVAL)refreshSchedule().catch(console.error);},60_000).unref();
+refresh().catch(console.error);
+setInterval(()=>{refresh(state.week!==weekKey()).catch(console.error);refreshSchedule().catch(console.error);},10000).unref();
